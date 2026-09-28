@@ -219,7 +219,7 @@ export default function App() {
           <h1 className="text-5xl font-extrabold text-blue-500 mb-2">
             CineSpin
           </h1>
-          <p className="text-gray-400 text-lg mb-10">Exclusivo do Casal</p>
+          <p className="text-gray-400 text-lg mb-10">Exclusivo</p>
           <button
             onClick={handleLogin}
             className="w-full bg-white text-gray-900 font-bold py-4 rounded-xl flex items-center justify-center gap-3 hover:bg-gray-100 transition-transform active:scale-95 shadow-lg"
