@@ -1,6 +1,6 @@
 # CineSpin
 
-> A roleta de filmes e séries definitiva para casais decidirem o que assistir sem briga!
+> A roleta de filmes e séries
 
 ![React](https://img.shields.io/badge/React-19-blue?style=for-the-badge&logo=react)
 ![TypeScript](https://img.shields.io/badge/TypeScript-Ready-blue?style=for-the-badge&logo=typescript)
