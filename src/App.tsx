@@ -64,6 +64,7 @@ interface SavedMovie {
   isGoldenTicket?: boolean;
   lockedByUid?: string;
   lockedByName?: string;
+  isSelected?: boolean; // Novo: Grava se o filme foi sorteado
   watchedAt?: string;
 }
 
@@ -77,6 +78,18 @@ const EMAILS_PERMITIDOS = [
   "ericleciojr14@gmail.com",
   "mclara10morais@gmail.com",
 ];
+
+// Algoritmo Fisher-Yates com Web Crypto API para NÍVEL CASSINO de aleatoriedade
+const shuffleArray = (array: SavedMovie[]) => {
+  const newArr = [...array];
+  for (let i = newArr.length - 1; i > 0; i--) {
+    const randomBuffer = new Uint32Array(1);
+    window.crypto.getRandomValues(randomBuffer);
+    const j = Math.floor((randomBuffer[0] / (0xffffffff + 1)) * (i + 1));
+    [newArr[i], newArr[j]] = [newArr[j], newArr[i]];
+  }
+  return newArr;
+};
 
 const playTickSound = () => {
   try {
@@ -135,11 +148,13 @@ export default function App() {
   const [poolMovies, setPoolMovies] = useState<SavedMovie[]>([]);
   const [watchedMovies, setWatchedMovies] = useState<SavedMovie[]>([]);
 
+  // Lista embaralhada da Roleta para mudar os lugares visualmente
+  const [wheelMovies, setWheelMovies] = useState<SavedMovie[]>([]);
+
   const [ticketBalance, setTicketBalance] = useState<number>(0);
 
   const [mustSpin, setMustSpin] = useState(false);
   const [prizeNumber, setPrizeNumber] = useState(0);
-  const [winner, setWinner] = useState<SavedMovie | null>(null);
 
   const [trailerKey, setTrailerKey] = useState<string | null>(null);
   const [providers, setProviders] = useState<Provider[]>([]);
@@ -168,7 +183,6 @@ export default function App() {
     return () => unsubscribe();
   }, []);
 
-  // SISTEMA DE ACÚMULO DE TICKETS
   useEffect(() => {
     if (!user) return;
     const checkAndGrantTickets = async () => {
@@ -213,7 +227,6 @@ export default function App() {
     return () => unsubscribeTickets();
   }, [user]);
 
-  // PESQUISA EM TEMPO REAL (AUTO-SUGESTÃO)
   useEffect(() => {
     const timeoutId = setTimeout(async () => {
       if (searchQuery.trim().length > 2) {
@@ -239,14 +252,13 @@ export default function App() {
           console.error("Erro ao buscar filmes:", error);
         }
       } else if (searchQuery.trim().length === 0) {
-        setMovies([]); // Limpa a lista se o usuário apagar a pesquisa
+        setMovies([]);
       }
-    }, 500); // 500ms de atraso para não sobrecarregar a API
+    }, 500);
 
     return () => clearTimeout(timeoutId);
   }, [searchQuery]);
 
-  // Monitora os Filmes em Tempo Real
   useEffect(() => {
     if (!user) return;
     const q = query(collection(db, "movies"));
@@ -262,8 +274,20 @@ export default function App() {
     return () => unsubscribeMovies();
   }, [user]);
 
+  // Embaralha visualmente a roda sempre que a lista mudar e NÃO estiver a girar
+  useEffect(() => {
+    if (!mustSpin && poolMovies.length > 0) {
+      setWheelMovies(shuffleArray(poolMovies));
+    }
+  }, [poolMovies, mustSpin]);
+
+  // Verifica persistência no Banco de Dados (Mesmo após dar F5, o vencedor ou bloqueio ficam salvos)
   const lockedMovie = poolMovies.find((m) => m.isGoldenTicket);
-  const activeMovieDisplay = lockedMovie || winner;
+  const dbWinner = poolMovies.find((m) => m.isSelected);
+
+  // Se estiver a girar (mustSpin === true), esconde o vencedor para mostrar a roleta girando
+  const activeMovieDisplay =
+    lockedMovie || (dbWinner && !mustSpin ? dbWinner : null);
   const activeTmdbId = activeMovieDisplay?.tmdbId;
 
   useEffect(() => {
@@ -294,12 +318,11 @@ export default function App() {
   useEffect(() => {
     if (lockedMovie) {
       setMustSpin(false);
-      setWinner(null);
     }
   }, [lockedMovie]);
 
   useEffect(() => {
-    let interval: NodeJS.Timeout;
+    let interval: ReturnType<typeof setInterval>;
     if (mustSpin && !lockedMovie) {
       interval = setInterval(() => playTickSound(), 150);
     }
@@ -326,13 +349,16 @@ export default function App() {
   const lastWatchedMovie = sortedWatched[0];
 
   const handleGoldenTicket = async (movie: SavedMovie) => {
-    if (!user || !user.uid || ticketBalance <= 0) return;
-    setWinner(null);
+    if (!user || !user.uid || ticketBalance <= 0 || lockedMovie) return;
+
+    // Se já havia um vencedor sorteado antes do bloqueio, remove ele
+    if (dbWinner) {
+      await updateDoc(doc(db, "movies", dbWinner.id), { isSelected: false });
+    }
 
     await updateDoc(doc(db, "golden_tickets", user.uid), {
       ticketBalance: ticketBalance - 1,
     });
-
     await updateDoc(doc(db, "movies", movie.id), {
       isGoldenTicket: true,
       lockedByUid: user.uid,
@@ -354,7 +380,6 @@ export default function App() {
 
   const handleSearchSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    // A busca já é feita automaticamente pelo useEffect ao digitar
   };
 
   const addToMyList = async (movie: TMDBMovie) => {
@@ -396,9 +421,9 @@ export default function App() {
     await updateDoc(doc(db, "movies", movie.id), {
       status: "watched",
       isGoldenTicket: false,
+      isSelected: false,
       watchedAt: new Date().toISOString(),
     });
-    setWinner(null);
     setActiveTab("historico");
   };
 
@@ -411,19 +436,26 @@ export default function App() {
     });
   };
 
-  const handleSpinClick = () => {
-    if (!mustSpin && poolMovies.length > 0 && !lockedMovie) {
-      setWinner(null);
-      setPrizeNumber(Math.floor(Math.random() * poolMovies.length));
+  const handleSpinClick = async () => {
+    if (!mustSpin && wheelMovies.length > 0 && !lockedMovie) {
+      // Aleatoriedade Criptográfica (Mais preciso que Math.random)
+      const randomBuffer = new Uint32Array(1);
+      window.crypto.getRandomValues(randomBuffer);
+      const randomFraction = randomBuffer[0] / (0xffffffff + 1);
+      const randomPrize = Math.floor(randomFraction * wheelMovies.length);
+
+      setPrizeNumber(randomPrize);
       setMustSpin(true);
     }
   };
 
-  const onStopSpinning = () => {
+  const onStopSpinning = async () => {
     setMustSpin(false);
-    const winnerMovie = poolMovies[prizeNumber];
+    const winnerMovie = wheelMovies[prizeNumber];
     if (winnerMovie && !lockedMovie) {
-      setWinner(winnerMovie);
+      // Salva o vencedor no banco de dados. Torna persistente após F5!
+      await updateDoc(doc(db, "movies", winnerMovie.id), { isSelected: true });
+
       playWinSound();
       confetti({
         particleCount: 150,
@@ -434,7 +466,14 @@ export default function App() {
     }
   };
 
-  const rouletteData = poolMovies.map((m) => ({
+  const handleSpinAgain = async () => {
+    // Ao clicar em girar novamente, remove a flag do DB e volta pra tela da roleta!
+    if (dbWinner) {
+      await updateDoc(doc(db, "movies", dbWinner.id), { isSelected: false });
+    }
+  };
+
+  const rouletteData = wheelMovies.map((m) => ({
     option: m.title.length > 15 ? `${m.title.substring(0, 15)}...` : m.title,
   }));
 
@@ -610,7 +649,7 @@ export default function App() {
 
         {activeTab === "roleta" && (
           <div>
-            {activeMovieDisplay && !mustSpin ? (
+            {activeMovieDisplay ? (
               <div
                 className={`rounded-3xl p-6 md:p-10 flex flex-col items-center shadow-2xl border-2 animate-in fade-in zoom-in duration-500 ${lockedMovie ? "border-yellow-500 bg-yellow-500/5" : "border-blue-500/50 " + bgCard}`}
               >
@@ -698,13 +737,13 @@ export default function App() {
                   ) : (
                     <div className="flex flex-col sm:flex-row w-full gap-3">
                       <button
-                        onClick={() => markAsWatched(winner!)}
+                        onClick={() => markAsWatched(activeMovieDisplay)}
                         className="flex-1 bg-emerald-600 hover:bg-emerald-500 text-white px-4 py-4 rounded-xl font-bold flex justify-center items-center gap-2 transition-transform active:scale-95 shadow-lg shadow-emerald-900/30"
                       >
                         <CheckCircle className="w-5 h-5" /> Já Assistimos!
                       </button>
                       <button
-                        onClick={() => setWinner(null)}
+                        onClick={handleSpinAgain}
                         className="flex-1 bg-zinc-800 hover:bg-zinc-700 px-4 py-4 rounded-xl font-bold flex justify-center items-center gap-2 transition-transform active:scale-95 border border-zinc-700 shadow-lg"
                       >
                         <RefreshCw className="w-5 h-5" /> Girar Novamente
@@ -713,7 +752,7 @@ export default function App() {
                   )}
                 </div>
               </div>
-            ) : poolMovies.length > 0 ? (
+            ) : wheelMovies.length > 0 ? (
               <div className="grid grid-cols-1 md:grid-cols-4 gap-6 items-start">
                 <div
                   className={`order-2 md:order-1 w-full p-4 rounded-2xl border ${bgCard} shadow-lg flex flex-col`}
@@ -854,7 +893,6 @@ export default function App() {
                 Adicionar Filme / Série
               </h2>
 
-              {/* O FORM AGORA SÓ PREVINE O REFRESH. A BUSCA É FEITA AO DIGITAR */}
               <form
                 onSubmit={handleSearchSubmit}
                 className="flex flex-col sm:flex-row gap-3"
@@ -962,13 +1000,15 @@ export default function App() {
                   <div className="flex items-center gap-2">
                     <button
                       onClick={() => handleGoldenTicket(movie)}
-                      disabled={ticketBalance <= 0}
+                      disabled={ticketBalance <= 0 || !!lockedMovie}
                       title={
-                        ticketBalance > 0
-                          ? "Gastar Ingresso Dourado!"
-                          : "Você não tem saldo!"
+                        lockedMovie
+                          ? `Bloqueado! ${lockedMovie.lockedByName} já usou o ingresso.`
+                          : ticketBalance > 0
+                            ? "Gastar Ingresso Dourado!"
+                            : "Você não tem saldo!"
                       }
-                      className={`p-2.5 rounded-xl transition-all flex items-center justify-center ${ticketBalance > 0 ? "bg-gradient-to-r from-yellow-400 to-yellow-600 text-white hover:scale-105 active:scale-95 shadow-[0_0_15px_rgba(250,204,21,0.5)] cursor-pointer" : "bg-zinc-800/50 text-zinc-600 cursor-not-allowed"}`}
+                      className={`p-2.5 rounded-xl transition-all flex items-center justify-center ${ticketBalance > 0 && !lockedMovie ? "bg-gradient-to-r from-yellow-400 to-yellow-600 text-white hover:scale-105 active:scale-95 shadow-[0_0_15px_rgba(250,204,21,0.5)] cursor-pointer" : "bg-zinc-800/50 text-zinc-600 cursor-not-allowed"}`}
                     >
                       <Crown className="w-4 h-4" />
                     </button>
